@@ -234,6 +234,112 @@ macro_rules! json_internal {
         json_internal!(@object $object ($($key)* $tt) ($($rest)*) ($($rest)*));
     };
 
+
+    //////////////////////////////////////////////////////////////////////////
+    // TT muncher for counting the elements inside of an object {...}.
+    // Each entry is replaced with `$capacity += 1;`
+    //
+    // Must be invoked as: json_internal!(@object_capacity $capacity () ($($tt)*) ($($tt)*))
+    //
+    // We require two copies of the input tokens so that we can match on one
+    // copy and trigger errors on the other copy.
+    //////////////////////////////////////////////////////////////////////////
+
+    // Done.
+    (@object_capacity $capacity:ident () () ()) => {};
+
+    // Current entry followed by trailing comma.
+    (@object_capacity $capacity:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
+        $capacity += 1;
+        json_internal!(@object_capacity $capacity () ($($rest)*) ($($rest)*));
+    };
+
+    // Current entry followed by unexpected token.
+    (@object_capacity $capacity:ident [$($key:tt)+] ($value:expr) $unexpected:tt $($rest:tt)*) => {
+        json_unexpected!($unexpected);
+    };
+
+    // Insert the last entry without trailing comma.
+    (@object_capacity $capacity:ident [$($key:tt)+] ($value:expr)) => {
+        $capacity += 1;
+    };
+
+    // Next value is `null`.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: null $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!(null)) $($rest)*)
+    };
+
+    // Next value is `true`.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: true $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!(true)) $($rest)*)
+    };
+
+    // Next value is `false`.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: false $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!(false)) $($rest)*)
+    };
+
+    // Next value is an array.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: [$($array:tt)*] $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!([$($array)*])) $($rest)*)
+    };
+
+    // Next value is a map.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: {$($map:tt)*} $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!({$($map)*})) $($rest)*)
+    };
+
+    // Next value is an expression followed by comma.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: $value:expr , $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!($value)) , $($rest)*)
+    };
+
+    // Last value is an expression with no trailing comma.
+    (@object_capacity $capacity:ident ($($key:tt)+) (: $value:expr) $copy:tt) => {
+        json_internal!(@object_capacity $capacity [$($key)+] (json_internal!($value)))
+    };
+
+    // Missing value for last entry. Trigger a reasonable error message.
+    (@object_capacity $capacity:ident ($($key:tt)+) (:) $copy:tt) => {
+        // "unexpected end of macro invocation"
+        json_internal!()
+    };
+
+    // Missing colon and value for last entry. Trigger a reasonable error
+    // message.
+    (@object_capacity $capacity:ident ($($key:tt)+) () $copy:tt) => {
+        // "unexpected end of macro invocation"
+        json_internal!()
+    };
+
+    // Misplaced colon. Trigger a reasonable error message.
+    (@object_capacity $capacity:ident () (: $($rest:tt)*) ($colon:tt $($copy:tt)*)) => {
+        // Takes no arguments so "no rules expected the token `:`".
+        json_unexpected!($colon)
+    };
+
+    // Found a comma inside a key. Trigger a reasonable error message.
+    (@object_capacity $capacity:ident ($($key:tt)*) (, $($rest:tt)*) ($comma:tt $($copy:tt)*)) => {
+        // Takes no arguments so "no rules expected the token `,`".
+        json_unexpected!($comma)
+    };
+
+    // Key is fully parenthesized. This avoids clippy double_parens false
+    // positives because the parenthesization may be necessary here.
+    (@object_capacity $capacity:ident () (($key:expr) : $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity ($key) (: $($rest)*) (: $($rest)*))
+    };
+
+    // Refuse to absorb colon token into key expression.
+    (@object_capacity $capacity:ident ($($key:tt)*) (: $($unexpected:tt)+) $copy:tt) => {
+        json_expect_expr_comma!($($unexpected)+)
+    };
+
+    // Munch a token into the current key.
+    (@object_capacity $capacity:ident ($($key:tt)*) ($tt:tt $($rest:tt)*) $copy:tt) => {
+        json_internal!(@object_capacity $capacity ($($key)* $tt) ($($rest)*) ($($rest)*))
+    };
+
     //////////////////////////////////////////////////////////////////////////
     // The main implementation.
     //
@@ -266,7 +372,9 @@ macro_rules! json_internal {
 
     ({ $($tt:tt)+ }) => {
         $crate::Value::Object({
-            let mut object = $crate::Map::new();
+            let mut capacity = 0;
+            json_internal!(@object_capacity capacity () ($($tt)+) ($($tt)+));
+            let mut object = $crate::Map::with_capacity(capacity);
             json_internal!(@object object () ($($tt)+) ($($tt)+));
             object
         })
